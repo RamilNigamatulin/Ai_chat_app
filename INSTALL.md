@@ -3,23 +3,27 @@
 ## Системные требования
 
 ### Общие требования
-- [Flutter SDK](https://flutter.dev/docs/get-started/install)
+- [Flutter SDK](https://flutter.dev/docs/get-started/install) 3.47 или выше (канал stable)
+- Dart SDK ^3.6.0 (входит в состав Flutter SDK)
 - Git
 - VS Code или Android Studio (рекомендуется)
 
+### Поддерживаемые платформы проекта
+Данный репозиторий содержит конфигурации только для двух платформ:
+- **Android** (`android/`)
+- **Windows** (`windows/`)
+
+Директорий `ios/` и `linux/` в проекте нет, поэтому сборка под iOS и Linux в текущей версии не поддерживается.
+
 ### Windows
 - Windows 10 или выше
-- Visual Studio 2019 или выше с Desktop development with C++ workload
+- Visual Studio 2022 (рекомендуется) с workload **Desktop development with C++**
 - Windows 10 SDK
 
 ### Android
 - Android Studio
 - Android SDK
-- Java Development Kit (JDK)
-
-### iOS (для сборки под iOS)
-- macOS с Xcode
-- CocoaPods
+- Java Development Kit (JDK) 17 — проект использует `sourceCompatibility`/`jvmTarget` = Java 17
 
 ## Установка
 
@@ -39,9 +43,20 @@ cd AIChatFlutter
    - Настройте форматирование кода (рекомендуется использовать dart format)
    - Убедитесь, что в настройках включена поддержка Flutter
 
-4. Установите зависимости проекта:
+4. Создайте файл `.env` (обязателен: он включён в `pubspec.yaml` как asset, без него сборка завершится ошибкой):
+```bash
+cp .env.example .env
+```
+   Содержимое можно оставить шаблонным — API ключ и провайдер вводятся в приложении на странице «Настройки» (см. раздел [Конфигурация](#конфигурация)).
+
+5. Установите зависимости проекта:
 ```bash
 flutter pub get
+```
+
+6. (Необязательно) Запустите тесты для проверки:
+```bash
+flutter test
 ```
 
 ## Настройка окружения для сборки
@@ -77,35 +92,26 @@ flutter doctor -v
    - Настройте Android SDK
    - Создайте и настройте Android эмулятор
 
-3. Настройте подписывание APK (для release-сборки):
+3. Настройте подписывание APK (для release-сборки) — **необязательно**:
+   - В текущей конфигурации `android/app/build.gradle.kts` release-сборка подписывается **debug-ключом** (чтобы `flutter run --release` работал сразу). Для публикации в сторах настройте собственную подпись:
    - Создайте keystore для подписи релизной версии:
-     ```bash
-     keytool -genkey -v -keystore android/app/upload-keystore.jks -storetype JKS -keyalg RSA -keysize 2048 -validity 10000 -alias upload
-     ```
+      ```bash
+      keytool -genkey -v -keystore android/app/upload-keystore.jks -storetype JKS -keyalg RSA -keysize 2048 -validity 10000 -alias upload
+      ```
    - Создайте файл `android/key.properties` со следующим содержимым:
-     ```properties
-     storePassword=<пароль от keystore>
-     keyPassword=<пароль от ключа>
-     keyAlias=upload
-     storeFile=app/upload-keystore.jks
-     ```
-   - Добавьте `key.properties` в `.gitignore`
+      ```properties
+      storePassword=<пароль от keystore>
+      keyPassword=<пароль от ключа>
+      keyAlias=upload
+      storeFile=app/upload-keystore.jks
+      ```
+   - Добавьте `key.properties` в `.gitignore` (уже добавлен в `android/.gitignore`)
+   - Подключите keystore в `android/app/build.gradle.kts` (Kotlin DSL): загрузите `key.properties` и замените `signingConfig = signingConfigs.getByName("debug")` в блоке `release` на конфигурацию с `upload-keystore.jks` по [официальной инструкции Flutter](https://docs.flutter.dev/deployment/android#sign-the-app)
 
 4. Проверьте настройку Flutter для Android:
 ```bash
 flutter doctor -v
 ```
-
-### iOS
-1. Установите Xcode с App Store
-2. Установите CocoaPods:
-```bash
-sudo gem install cocoapods
-```
-3. Настройте Xcode:
-   - Откройте ios/Runner.xcworkspace в Xcode
-   - Убедитесь, что выбрана последняя версия iOS SDK
-   - Настройте подписание приложения (автоматическое или вручную)
 
 ## Сборка приложения
 
@@ -123,18 +129,14 @@ flutter build apk --release
 flutter build apk --split-per-abi
 ```
 
-### iOS
+### Windows
 1. Debug версия (для тестирования):
 ```bash
-flutter build ios --debug
+flutter build windows --debug
 ```
 2. Release версия (для публикации):
 ```bash
-flutter build ios --release
-```
-3. Создание .ipa файла:
-```bash
-flutter build ipa
+flutter build windows --release
 ```
 
 ## Расположение сбилденных файлов
@@ -147,18 +149,9 @@ flutter build ipa
   - `build/app/outputs/flutter-apk/app-arm64-v8a-release.apk`
   - `build/app/outputs/flutter-apk/app-x86_64-release.apk`
 
-### iOS
-- Debug: `build/ios/iphoneos/Runner.app`
-- Release: `build/ios/iphoneos/Runner.app`
-- IPA: `build/ios/ipa/Runner.ipa`
-
 ### Windows
-- Debug: `build/windows/runner/Debug/`
-- Release: `build/windows/runner/Release/`
-
-### Linux
-- Debug: `build/linux/x64/debug/bundle/`
-- Release: `build/linux/x64/release/bundle/`
+- Debug: `build/windows/x64/runner/Debug/`
+- Release: `build/windows/x64/runner/Release/`
 
 ## Запуск приложения в desktop режиме для отладки
 
@@ -173,20 +166,6 @@ flutter config --enable-windows-desktop
 3. Запустите приложение:
 ```bash
 flutter run -d windows
-```
-
-### Linux
-1. Установите необходимые зависимости:
-```bash
-sudo apt-get install clang cmake ninja-build pkg-config libgtk-3-dev
-```
-2. Включите поддержку Linux desktop:
-```bash
-flutter config --enable-linux-desktop
-```
-3. Запустите приложение:
-```bash
-flutter run -d linux
 ```
 
 ## Запуск приложения в Android эмуляторе
@@ -224,15 +203,28 @@ flutter run -d linux
 
 ## Конфигурация
 
-1. Создайте файл .env на основе .env.example:
+Конфигурация имеет два уровня (подробнее см. раздел «Конфигурация» в [README.md](README.md)):
+
+1. Создайте файл `.env` на основе `.env.example` (файл обязателен для сборки, но значения могут быть шаблонными):
 ```bash
 cp .env.example .env
 ```
 
-2. Отредактируйте .env и добавьте ваш API ключ:
+2. Значения по умолчанию в `.env` (необязательно менять):
 ```
-OPENROUTER_API_KEY=ваш-ключ-здесь
+OPENROUTER_API_KEY=your_api_key_here
+BASE_URL=https://openrouter.ai/api/v1
+MAX_TOKENS=1000
+TEMPERATURE=0.7
 ```
+
+3. Основной способ настройки — страница **«Настройки»** в приложении (без перезапуска):
+   - Провайдер API: OpenRouter.ai или VseGPT.ru
+   - API ключ (вводится вместо значения из `.env`)
+   - Максимальное количество токенов
+   - Температура генерации (0.0 - 2.0)
+
+   Настройки сохраняются в `SharedPreferences` и имеют приоритет над `.env`.
 
 ## Проверка установки
 
@@ -241,9 +233,15 @@ OPENROUTER_API_KEY=ваш-ключ-здесь
 flutter doctor
 ```
 
-2. Запустите приложение для проверки:
+2. Запустите тесты:
+```bash
+flutter test
+```
+   Ожидаемый результат: `test/navigation_test.dart` проходит (тест `widget_test.dart` — устаревший шаблонный и завершается ошибкой, на работу приложения не влияет).
+
+3. Запустите приложение для проверки:
 ```bash
 flutter run
 ```
 
-Если все установлено правильно, приложение должно запуститься на выбранном устройстве (эмулятор Android, iOS или Windows).
+Если все установлено правильно, приложение должно запуститься на выбранном устройстве (эмулятор Android или Windows).

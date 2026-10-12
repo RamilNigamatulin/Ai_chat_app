@@ -4,16 +4,12 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 // Import Flutter core classes
 import 'package:flutter/foundation.dart';
-// Import package for working with .env files
-import 'package:flutter_dotenv/flutter_dotenv.dart';
+// Import configuration service (runtime provider/api-key settings)
+import '../services/config_service.dart';
 
-// Класс клиента для работы с API OpenRouter
+// Класс клиента для работы с API OpenRouter/VseGPT
 class OpenRouterClient {
-  // API ключ для авторизации
-  final String? apiKey;
-  // Базовый URL API
-  final String? baseUrl;
-  // Заголовки HTTP запросов
+  // Статические заголовки HTTP запросов
   final Map<String, String> headers;
 
   // Единственный экземпляр класса (Singleton)
@@ -24,14 +20,12 @@ class OpenRouterClient {
     return _instance;
   }
 
+  // Сервис конфигурации (провайдер, ключ, параметры генерации)
+  final ConfigService _config = ConfigService();
+
   // Приватный конструктор для реализации Singleton
   OpenRouterClient._internal()
-      : apiKey =
-            dotenv.env['OPENROUTER_API_KEY'], // Получение API ключа из .env
-        baseUrl = dotenv.env['BASE_URL'], // Получение базового URL из .env
-        headers = {
-          'Authorization':
-              'Bearer ${dotenv.env['OPENROUTER_API_KEY']}', // Заголовок авторизации
+      : headers = {
           'Content-Type': 'application/json', // Указание типа контента
           'X-Title': 'AI Chat Flutter', // Название приложения
         } {
@@ -39,72 +33,65 @@ class OpenRouterClient {
     _initializeClient();
   }
 
+  // API ключ для авторизации (берётся из конфигурации в рантайме)
+  String? get apiKey => _config.apiKey;
+
+  // Базовый URL API (определяется выбранным провайдером)
+  String get baseUrl => _config.baseUrl;
+
+  // Признак провайдера VseGPT (единый источник правды — ConfigService)
+  bool get isVsetgpt => _config.isVseGpt;
+
+  // Признак наличия API ключа
+  bool get hasApiKey => _config.hasApiKey;
+
   // Метод инициализации клиента
   void _initializeClient() {
-    try {
-      if (kDebugMode) {
-        print('Initializing OpenRouterClient...');
-        print('Base URL: $baseUrl');
-      }
-
-      // Проверка наличия API ключа
-      if (apiKey == null) {
-        throw Exception('OpenRouter API key not found in .env');
-      }
-      // Проверка наличия базового URL
-      if (baseUrl == null) {
-        throw Exception('BASE_URL not found in .env');
-      }
-
-      if (kDebugMode) {
-        print('OpenRouterClient initialized successfully');
-      }
-    } catch (e, stackTrace) {
-      if (kDebugMode) {
-        print('Error initializing OpenRouterClient: $e');
-        print('Stack trace: $stackTrace');
-      }
-      rethrow;
+    if (kDebugMode) {
+      debugPrint('Initializing OpenRouterClient...');
+      debugPrint('Base URL: $baseUrl');
+      debugPrint('API key present: ${_config.hasApiKey}');
     }
   }
+
+  // Формирование заголовков запроса с учётом текущего API ключа
+  Map<String, String> get _headers => {
+        ...headers,
+        'Authorization': 'Bearer ${_config.apiKey}', // Заголовок авторизации
+      };
 
   // Метод получения списка доступных моделей
   Future<List<Map<String, dynamic>>> getModels() async {
     try {
-      // Выполнение GET запроса для получения моделей
-      final response = await http.get(
-        Uri.parse('$baseUrl/models'),
-        headers: headers,
-      );
+      // Выполнение GET запроса для получения моделей (с таймаутом)
+      final response = await http
+          .get(
+            Uri.parse('$baseUrl/models'),
+            headers: _headers,
+          )
+          .timeout(_listTimeout);
 
       if (kDebugMode) {
-        print('Models response status: ${response.statusCode}');
-        print('Models response body: ${response.body}');
+        debugPrint('Models response status: ${response.statusCode}');
       }
 
       if (response.statusCode == 200) {
-        // Парсинг данных о моделях
-        final modelsData = json.decode(response.body);
+        // Парсинг данных о моделях (байты декодируются как UTF-8,
+        // чтобы кириллические имена моделей отображались корректно)
+        final modelsData = json.decode(utf8.decode(response.bodyBytes));
         if (modelsData['data'] != null) {
           return (modelsData['data'] as List)
               .map((model) => {
                     'id': model['id'] as String,
-                    'name': (() {
-                      try {
-                        return utf8.decode((model['name'] as String).codeUnits);
-                      } catch (e) {
-                        // Remove invalid UTF-8 characters and try again
-                        final cleaned = (model['name'] as String)
-                            .replaceAll(RegExp(r'[^\x00-\x7F]'), '');
-                        return utf8.decode(cleaned.codeUnits);
-                      }
-                    })(),
+                    // Имя модели используется как есть — API уже
+                    // отдаёт его в правильной кодировке UTF-8
+                    'name': (model['name'] as String?) ?? model['id'],
                     'pricing': {
-                      'prompt': model['pricing']['prompt'] as String,
-                      'completion': model['pricing']['completion'] as String,
+                      'prompt': model['pricing']?['prompt'] ?? '0',
+                      'completion': model['pricing']?['completion'] ?? '0',
                     },
                     'context_length': (model['context_length'] ??
-                            model['top_provider']['context_length'] ??
+                            model['top_provider']?['context_length'] ??
                             0)
                         .toString(),
                   })
@@ -113,55 +100,93 @@ class OpenRouterClient {
         throw Exception('Invalid API response format');
       } else {
         // Возвращение моделей по умолчанию, если API недоступен
-        return [
-          {'id': 'deepseek-coder', 'name': 'DeepSeek'},
-          {'id': 'claude-3-sonnet', 'name': 'Claude 3.5 Sonnet'},
-          {'id': 'gpt-3.5-turbo', 'name': 'GPT-3.5 Turbo'},
-        ];
+        return _defaultModels();
       }
     } catch (e) {
       if (kDebugMode) {
-        print('Error getting models: $e');
+        debugPrint('Error getting models: $e');
       }
       // Возвращение моделей по умолчанию в случае ошибки
-      return [
-        {'id': 'deepseek-coder', 'name': 'DeepSeek'},
-        {'id': 'claude-3-sonnet', 'name': 'Claude 3.5 Sonnet'},
-        {'id': 'gpt-3.5-turbo', 'name': 'GPT-3.5 Turbo'},
-      ];
+      return _defaultModels();
     }
   }
 
+  // Модели по умолчанию (используются, если список не удалось получить)
+  //
+  // ВАЖНО: каждая модель должна содержать 'pricing' и 'context_length',
+  // иначе UI (dropdown с ценами) упадёт при попытке распарсить null.
+  List<Map<String, dynamic>> _defaultModels() => [
+        {
+          'id': 'deepseek-coder',
+          'name': 'DeepSeek',
+          'pricing': {'prompt': '0', 'completion': '0'},
+          'context_length': '0',
+        },
+        {
+          'id': 'claude-3-sonnet',
+          'name': 'Claude 3.5 Sonnet',
+          'pricing': {'prompt': '0', 'completion': '0'},
+          'context_length': '0',
+        },
+        {
+          'id': 'gpt-3.5-turbo',
+          'name': 'GPT-3.5 Turbo',
+          'pricing': {'prompt': '0', 'completion': '0'},
+          'context_length': '0',
+        },
+      ];
+
+  // Таймауты HTTP-запросов (защита от вечного ожидания)
+  static const Duration _listTimeout = Duration(seconds: 30);
+  static const Duration _chatTimeout = Duration(seconds: 120);
+
+  // Максимальное количество последних сообщений диалога,
+  // передаваемых в API как контекст (защита от переполнения контекста)
+  static const int _maxContextMessages = 20;
+
   // Метод отправки сообщения через API
-  Future<Map<String, dynamic>> sendMessage(String message, String model) async {
+  //
+  // В [history] передаётся контекст предыдущих реплик диалога
+  // (в хронологическом порядке, уже без текущего сообщения).
+  Future<Map<String, dynamic>> sendMessage(
+    String message,
+    String model, {
+    List<Map<String, String>> history = const [],
+  }) async {
     try {
-      // Подготовка данных для отправки
+      // Ограничение контекста последними сообщениями
+      final context = history.length > _maxContextMessages
+          ? history.sublist(history.length - _maxContextMessages)
+          : history;
+
+      // Подготовка данных для отправки:
+      // история диалога + текущее сообщение пользователя
       final data = {
         'model': model, // Модель для генерации ответа
         'messages': [
+          ...context, // Предыдущие реплики (контекст для модели)
           {'role': 'user', 'content': message} // Сообщение пользователя
         ],
-        'max_tokens': int.parse(dotenv.env['MAX_TOKENS'] ??
-            '1000'), // Максимальное количество токенов
-        'temperature': double.parse(
-            dotenv.env['TEMPERATURE'] ?? '0.7'), // Температура генерации
+        'max_tokens': _config.maxTokens, // Максимальное количество токенов
+        'temperature': _config.temperature, // Температура генерации
         'stream': false, // Отключение потоковой передачи
       };
 
       if (kDebugMode) {
-        print('Sending message to API: ${json.encode(data)}');
+        debugPrint('Sending message to API: ${json.encode(data)}');
       }
 
-      // Выполнение POST запроса
-      final response = await http.post(
-        Uri.parse('$baseUrl/chat/completions'),
-        headers: headers,
-        body: json.encode(data),
-      );
+      // Выполнение POST запроса с таймаутом
+      final response = await http
+          .post(
+            Uri.parse('$baseUrl/chat/completions'),
+            headers: _headers,
+            body: json.encode(data),
+          )
+          .timeout(_chatTimeout);
 
       if (kDebugMode) {
-        print('Message response status: ${response.statusCode}');
-        print('Message response body: ${response.body}');
+        debugPrint('Message response status: ${response.statusCode}');
       }
 
       if (response.statusCode == 200) {
@@ -177,33 +202,41 @@ class OpenRouterClient {
       }
     } catch (e) {
       if (kDebugMode) {
-        print('Error sending message: $e');
+        debugPrint('Error sending message: $e');
       }
       return {'error': e.toString()};
     }
   }
 
   // Метод получения текущего баланса
-  Future<String> getBalance() async {
+  //
+  // Возвращает отформатированную сумму или null при ошибке
+  // (null позволяет сохранить прежний баланс вместо отображения 'Error').
+  Future<String?> getBalance() async {
+    // Отсутствие ключа — сразу нулевой баланс (без запроса к API)
+    if (!_config.hasApiKey) {
+      return isVsetgpt ? '0.00₽' : r'$0.00';
+    }
+
     try {
-      // Выполнение GET запроса для получения баланса
-      final response = await http.get(
-        Uri.parse(baseUrl?.contains('vsegpt.ru') == true
-            ? '$baseUrl/balance'
-            : '$baseUrl/credits'),
-        headers: headers,
-      );
+      // Выполнение GET запроса для получения баланса (с таймаутом)
+      final response = await http
+          .get(
+            Uri.parse(isVsetgpt ? '$baseUrl/balance' : '$baseUrl/credits'),
+            headers: _headers,
+          )
+          .timeout(_listTimeout);
 
       if (kDebugMode) {
-        print('Balance response status: ${response.statusCode}');
-        print('Balance response body: ${response.body}');
+        debugPrint('Balance response status: ${response.statusCode}');
       }
 
+      // Успешный ответ — возвращаем рассчитанную сумму
       if (response.statusCode == 200) {
         // Парсинг данных о балансе
-        final data = json.decode(response.body);
+        final data = json.decode(utf8.decode(response.bodyBytes));
         if (data != null && data['data'] != null) {
-          if (baseUrl?.contains('vsegpt.ru') == true) {
+          if (isVsetgpt) {
             final credits =
                 double.tryParse(data['data']['credits'].toString()) ??
                     0.0; // Доступно средств
@@ -216,30 +249,31 @@ class OpenRouterClient {
           }
         }
       }
-      return baseUrl?.contains('vsegpt.ru') == true
-          ? '0.00₽'
-          : '\$0.00'; // Возвращение нулевого баланса по умолчанию
+      // Не-200 или неожиданный формат — не обновляем баланс
+      return null;
     } catch (e) {
       if (kDebugMode) {
-        print('Error getting balance: $e');
+        debugPrint('Error getting balance: $e');
       }
-      return 'Error'; // Возвращение ошибки в случае исключения
+      // Ошибка (сеть/таймаут) — прежний баланс сохраняется
+      return null;
     }
   }
 
   // Метод форматирования цен
   String formatPricing(double pricing) {
     try {
-      if (baseUrl?.contains('vsegpt.ru') == true) {
+      if (isVsetgpt) {
         return '${pricing.toStringAsFixed(3)}₽/K';
       } else {
         return '\$${(pricing * 1000000).toStringAsFixed(3)}/M';
       }
     } catch (e) {
       if (kDebugMode) {
-        print('Error formatting pricing: $e');
+        debugPrint('Error formatting pricing: $e');
       }
       return '0.00';
     }
   }
 }
+

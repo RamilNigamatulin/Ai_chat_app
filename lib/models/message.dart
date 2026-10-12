@@ -15,6 +15,9 @@ class ChatMessage {
   final int? tokens;
   // Стоимость запроса
   final double? cost;
+  // Признак сообщения об ошибке (не сохраняется в БД,
+  // не передаётся в API как контекст диалога)
+  final bool isError;
 
   // Конструктор класса ChatMessage
   ChatMessage({
@@ -24,6 +27,7 @@ class ChatMessage {
     this.modelId, // Необязательный параметр: идентификатор модели
     this.tokens, // Необязательный параметр: количество токенов
     this.cost, // Необязательный параметр: стоимость запроса
+    this.isError = false, // По умолчанию сообщение не является ошибкой
   }) : timestamp = timestamp ??
             DateTime.now(); // Установка текущего времени, если не указано
 
@@ -37,6 +41,7 @@ class ChatMessage {
       'modelId': modelId, // Идентификатор модели
       'tokens': tokens, // Количество токенов
       'cost': cost, // Стоимость запроса
+      'isError': isError, // Флаг ошибки
     };
   }
 
@@ -52,6 +57,7 @@ class ChatMessage {
         modelId: json['modelId'] as String?, // Получение идентификатора модели
         tokens: json['tokens'] as int?, // Получение количества токенов
         cost: json['cost'] as double?, // Получение стоимости запроса
+        isError: json['isError'] as bool? ?? false, // Флаг ошибки
       );
     } catch (e) {
       // Логирование ошибок при декодировании

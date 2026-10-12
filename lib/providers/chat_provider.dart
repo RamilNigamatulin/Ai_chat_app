@@ -32,10 +32,17 @@ class ChatProvider with ChangeNotifier {
   // Флаг загрузки
   bool _isLoading = false;
 
+  // Максимальный размер буфера отладочных логов (защита от утечки памяти)
+  static const int _maxLogEntries = 500;
+
   // Метод для логирования сообщений
   void _log(String message) {
     // Добавление сообщения в логи с временной меткой
     _debugLogs.add('${DateTime.now()}: $message');
+    // Ограничение размера буфера (выкидываем самую старую запись)
+    if (_debugLogs.length > _maxLogEntries) {
+      _debugLogs.removeAt(0);
+    }
     // Вывод сообщения в консоль
     debugPrint(message);
   }
@@ -89,8 +96,12 @@ class ChatProvider with ChangeNotifier {
       // Сортировка моделей по имени по возрастанию
       _availableModels
           .sort((a, b) => (a['name'] as String).compareTo(b['name'] as String));
-      // Установка модели по умолчанию, если она не выбрана
-      if (_availableModels.isNotEmpty && _currentModel == null) {
+      // Валидация текущей модели: она должна присутствовать в новом
+      // списке (иначе — после смены провайдера — выбираем первую)
+      if (_availableModels.isEmpty) {
+        _currentModel = null;
+      } else if (_currentModel == null ||
+          !_availableModels.any((m) => m['id'] == _currentModel)) {
         _currentModel = _availableModels[0]['id'];
       }
       // Уведомление слушателей об изменениях
@@ -104,8 +115,11 @@ class ChatProvider with ChangeNotifier {
   // Метод загрузки баланса пользователя
   Future<void> _loadBalance() async {
     try {
-      // Получение баланса из API
-      _balance = await _api.getBalance();
+      // Получение баланса из API (null — ошибка, прежний баланс сохраняется)
+      final newBalance = await _api.getBalance();
+      if (newBalance != null) {
+        _balance = newBalance;
+      }
       // Уведомление слушателей об изменениях
       notifyListeners();
     } catch (e) {
@@ -148,6 +162,8 @@ class ChatProvider with ChangeNotifier {
 
   // Метод отправки сообщения
   Future<void> sendMessage(String content, {bool trackAnalytics = true}) async {
+    // Блокировка повторной отправки, пока идёт предыдущий запрос
+    if (_isLoading) return;
     // Проверка на пустое сообщение или отсутствие модели
     if (content.trim().isEmpty || _currentModel == null) return;
 
@@ -157,8 +173,15 @@ class ChatProvider with ChangeNotifier {
     notifyListeners();
 
     try {
-      // Обеспечение правильного кодирования сообщения
-      content = utf8.decode(utf8.encode(content));
+      // Контекст диалога: предыдущие реплики (кроме ошибок)
+      // в формате role/content для передачи в API
+      final history = _messages
+          .where((m) => !m.isError)
+          .map((m) => {
+                'role': m.isUser ? 'user' : 'assistant',
+                'content': m.content,
+              })
+          .toList();
 
       // Добавление сообщения пользователя
       final userMessage = ChatMessage(
@@ -176,8 +199,12 @@ class ChatProvider with ChangeNotifier {
       // Запись времени начала отправки
       final startTime = DateTime.now();
 
-      // Отправка сообщения в API
-      final response = await _api.sendMessage(content, _currentModel!);
+      // Отправка сообщения в API вместе с контекстом диалога
+      final response = await _api.sendMessage(
+        content,
+        _currentModel!,
+        history: history,
+      );
       // Логирование ответа API
       _log('API Response: $response');
 
@@ -186,14 +213,14 @@ class ChatProvider with ChangeNotifier {
           DateTime.now().difference(startTime).inMilliseconds / 1000;
 
       if (response.containsKey('error')) {
-        // Добавление сообщения об ошибке
+        // Добавление сообщения об ошибке (только в UI, без сохранения в БД)
         final errorMessage = ChatMessage(
-          content: utf8.decode(utf8.encode('Error: ${response['error']}')),
+          content: 'Error: ${response['error']}',
           isUser: false,
           modelId: _currentModel,
+          isError: true,
         );
         _messages.add(errorMessage);
-        await _saveMessage(errorMessage);
       } else if (response.containsKey('choices') &&
           response['choices'] is List &&
           response['choices'].isNotEmpty &&
@@ -220,22 +247,30 @@ class ChatProvider with ChangeNotifier {
 
         // Создание и добавление сообщения AI
         // Получение количества токенов из ответа
-        final promptTokens = response['usage']['prompt_tokens'] ?? 0;
-        final completionTokens = response['usage']['completion_tokens'] ?? 0;
+        final promptTokens = response['usage']?['prompt_tokens'] ?? 0;
+        final completionTokens = response['usage']?['completion_tokens'] ?? 0;
 
         final totalCost = response['usage']?['total_cost'];
 
-        // Получение тарифов для текущей модели
-        final model = _availableModels
-            .firstWhere((model) => model['id'] == _currentModel);
+        // Получение тарифов для текущей модели.
+        // orElse защищает от StateError, если модель исчезла из списка
+        // (например, после смены провайдера во время генерации).
+        final model = _availableModels.firstWhere(
+          (model) => model['id'] == _currentModel,
+          orElse: () => {
+            'id': _currentModel,
+            'pricing': {'prompt': '0', 'completion': '0'},
+          },
+        );
 
-        // Расчет стоимости запроса
+        // Расчет стоимости запроса (всегда double для модели)
         final cost = (totalCost == null)
             ? ((promptTokens *
-                    (double.tryParse(model['pricing']?['prompt']) ?? 0)) +
+                    (double.tryParse('${model['pricing']?['prompt']}') ?? 0)) +
                 (completionTokens *
-                    (double.tryParse(model['pricing']?['completion']) ?? 0)))
-            : totalCost;
+                    (double.tryParse('${model['pricing']?['completion']}') ??
+                        0)))
+            : (totalCost as num).toDouble();
 
         // Логирование ответа API
         _log('Cost Response: $cost');
@@ -259,15 +294,14 @@ class ChatProvider with ChangeNotifier {
     } catch (e) {
       // Логирование ошибок отправки сообщения
       _log('Error sending message: $e');
-      // Добавление сообщения об ошибке
+      // Добавление сообщения об ошибке (только в UI, без сохранения в БД)
       final errorMessage = ChatMessage(
-        content: utf8.decode(utf8.encode('Error: $e')),
+        content: 'Error: $e',
         isUser: false,
         modelId: _currentModel,
+        isError: true,
       );
       _messages.add(errorMessage);
-      // Сохранение сообщения об ошибке
-      await _saveMessage(errorMessage);
     } finally {
       // Сброс флага загрузки
       _isLoading = false;
@@ -282,6 +316,40 @@ class ChatProvider with ChangeNotifier {
     _currentModel = modelId;
     // Уведомление слушателей об изменениях
     notifyListeners();
+  }
+
+  // Метод обновления данных после изменения настроек
+  //
+  // Вызывается после сохранения новой конфигурации (смены провайдера
+  // или API ключа) на странице настроек.
+  Future<void> refresh() async {
+    _log('Refreshing provider data...');
+    // Загрузка списка моделей с новыми настройками
+    await _loadModels();
+    // Загрузка баланса с новыми настройками
+    await _loadBalance();
+    _log('Provider data refreshed: models=${_availableModels.length}, '
+        'balance=$_balance');
+  }
+
+  // Метод получения статистики использования токенов моделями
+  //
+  // Возвращает агрегированные данные из БД:
+  // total_messages, total_tokens, model_usage (count/tokens по моделям).
+  Future<Map<String, dynamic>> getModelUsageStatistics() async {
+    return _db.getStatistics();
+  }
+
+  // Метод получения данных о расходах по дням
+  //
+  // Возвращает список {'day': 'YYYY-MM-DD', 'cost': double}.
+  Future<List<Map<String, dynamic>>> getDailySpending({int days = 30}) {
+    return _db.getDailySpending(days: days);
+  }
+
+  // Метод получения статистики текущей сессии (время ответа и т.п.)
+  Map<String, dynamic> getSessionStatistics() {
+    return _analytics.getStatistics();
   }
 
   // Метод очистки истории

@@ -90,28 +90,32 @@ class DatabaseService {
   }
 
   // Метод получения сообщений из базы данных
+  //
+  // Возвращает последние [limit] сообщений в хронологическом порядке
+  // (от старых к новым). Запрос выполняется в порядке убывания id,
+  // чтобы получить именно последние записи, затем порядок разворачивается.
   Future<List<ChatMessage>> getMessages({int limit = 50}) async {
     try {
       final db = await database;
-      // Запрос данных из таблицы messages
+      // Запрос последних записей (id растёт вместе со временем)
       final List<Map<String, dynamic>> maps = await db.query(
         'messages',
-        orderBy: 'timestamp ASC', // Сортировка по времени
+        orderBy: 'id DESC', // Сначала самые новые записи
         limit: limit, // Ограничение количества записей
       );
 
       // Преобразование данных в объекты ChatMessage
-      return List.generate(maps.length, (i) {
+      // (maps.reversed — возвращаем хронологический порядок старые→новые)
+      return maps.reversed.map((row) {
         return ChatMessage(
-          content: maps[i]['content'] as String, // Текст сообщения
-          isUser: maps[i]['is_user'] == 1, // Преобразование int в bool
-          timestamp:
-              DateTime.parse(maps[i]['timestamp'] as String), // Временная метка
-          modelId: maps[i]['model_id'] as String?, // Идентификатор модели
-          tokens: maps[i]['tokens'] as int?, // Количество токенов
-          cost: maps[i]['cost'] as double?, // Стоимость запроса
+          content: row['content'] as String, // Текст сообщения
+          isUser: row['is_user'] == 1, // Преобразование int в bool
+          timestamp: DateTime.parse(row['timestamp'] as String), // Время
+          modelId: row['model_id'] as String?, // Идентификатор модели
+          tokens: row['tokens'] as int?, // Количество токенов
+          cost: (row['cost'] as num?)?.toDouble(), // Стоимость запроса
         );
-      });
+      }).toList();
     } catch (e) {
       debugPrint('Error getting messages: $e'); // Логирование ошибок
       return []; // Возврат пустого списка в случае ошибки
@@ -125,6 +129,42 @@ class DatabaseService {
       await db.delete('messages'); // Удаление всех записей из таблицы
     } catch (e) {
       debugPrint('Error clearing history: $e'); // Логирование ошибок
+    }
+  }
+
+  // Метод получения статистики по расходам за день
+  //
+  // Возвращает список записей вида {'day': '2025-01-20', 'cost': 0.12}
+  // за последние [days] дней (по умолчанию 30).
+  Future<List<Map<String, dynamic>>> getDailySpending(
+      {int days = 30}) async {
+    try {
+      final db = await database;
+
+      // Граница периода (сообщения хранятся с timestamp в ISO 8601)
+      final since = DateTime.now()
+          .subtract(Duration(days: days))
+          .toIso8601String();
+
+      // Группировка сообщений по календарному дню с суммой стоимости
+      final List<Map<String, dynamic>> maps = await db.rawQuery('''
+        SELECT substr(timestamp, 1, 10) AS day, SUM(cost) AS cost
+        FROM messages
+        WHERE cost IS NOT NULL AND timestamp >= ?
+        GROUP BY day
+        ORDER BY day ASC
+      ''', [since]);
+
+      // Преобразование данных в список Map
+      return maps
+          .map((m) => {
+                'day': m['day'] as String,
+                'cost': (m['cost'] as num?)?.toDouble() ?? 0.0,
+              })
+          .toList();
+    } catch (e) {
+      debugPrint('Error getting daily spending: $e'); // Логирование ошибок
+      return []; // Возврат пустого списка в случае ошибки
     }
   }
 
